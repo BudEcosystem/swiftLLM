@@ -1,6 +1,9 @@
 import time
+import torch
 import argparse
 from transformers import AutoTokenizer
+from PIL import Image
+import torchvision.transforms as transforms
 
 import swiftllm
 
@@ -46,21 +49,29 @@ if __name__ == '__main__':
     print(f"Model creation time: {model_creation_time:.2f} seconds")
     
     prompts = [
-        "Life blooms like a flower, far away",
-        "one two three four five",
-        "A B C D E F G H I J K L M N O P Q R S T U V",
-        "To be or not to be,",
+        "USER: <image>\nWhat are these? ASSISTANT:"
     ]
 
     tokenizer = AutoTokenizer.from_pretrained(model_path)
     outputs = []
-
+    image_path = 'examples/group-image.jpeg'
+    output_path = 'examples/group-resized.jpeg'
+    target_size=(336, 336)
+    pixel_values = Image.open(image_path)
+    with Image.open(image_path) as img:
+        # Resize image
+        pixel_values = img.resize(target_size, Image.LANCZOS)
+        img.save(output_path)
+    transform = transforms.ToTensor()
+    image_tensor = [transform(pixel_values)]
+    image_tensor = torch.stack(image_tensor)
     # Prompt phase
     input_ids = tokenizer(prompts)['input_ids']
     prompt_phase_outputs = model.forward(
         input_ids,
         list(range(0, len(prompts))),
-        []
+        [],
+        pixel_values=image_tensor
     )
     # print(tokenizer.batch_decode(prompt_phase_outputs, skip_special_tokens=True))
     outputs.append(prompt_phase_outputs)

@@ -16,6 +16,6 @@ class LlamaPreLayer:
         self,
         input_ids: torch.Tensor
     ) -> torch.Tensor:
-        input_embdings = torch.embedding(self.weights.wte, input_ids, padding_idx=-1)
+        input_embdings = torch.embedding(self.weights.language_model.wte, input_ids, padding_idx=-1)
         return input_embdings
     

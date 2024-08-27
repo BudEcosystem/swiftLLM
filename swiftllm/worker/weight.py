@@ -4,7 +4,8 @@ import dataclasses
 import torch
 import safetensors
 
-from swiftllm.model_config import LlamaModelConfig
+from swiftllm.model_config import LlamaModelConfig, LlavaConfig
+from swiftllm.worker.layers.clip_vision_model import get_clip_num_patches
 
 @dataclasses.dataclass
 class RegisteredWeightItem:
@@ -70,56 +71,56 @@ class LlamaTransformerLayerWeight(WeightBase):
 
         self.register_weight(RegisteredWeightItem(
             "attn_norm",
-            f"model.layers.{self.layer_id}.input_layernorm.weight",
+            f"language_model.model.layers.{self.layer_id}.input_layernorm.weight",
             (self.model_config.hidden_size,),
             self.dtype
         ))
         self.register_weight(RegisteredWeightItem(
             "q_proj",
-            f"model.layers.{self.layer_id}.self_attn.q_proj.weight",
+            f"language_model.model.layers.{self.layer_id}.self_attn.q_proj.weight",
             (self.model_config.hidden_size, self.model_config.hidden_size),
             self.dtype
         ))
         self.register_weight(RegisteredWeightItem(
             "k_proj",
-            f"model.layers.{self.layer_id}.self_attn.k_proj.weight",
+            f"language_model.model.layers.{self.layer_id}.self_attn.k_proj.weight",
             (self.model_config.num_kv_heads*self.model_config.head_dim, self.model_config.hidden_size),
             self.dtype
         ))
         self.register_weight(RegisteredWeightItem(
             "v_proj",
-            f"model.layers.{self.layer_id}.self_attn.v_proj.weight",
+            f"language_model.model.layers.{self.layer_id}.self_attn.v_proj.weight",
             (self.model_config.num_kv_heads*self.model_config.head_dim, self.model_config.hidden_size),
             self.dtype
         ))
         self.register_weight(RegisteredWeightItem(
             "o_proj",
-            f"model.layers.{self.layer_id}.self_attn.o_proj.weight",
+            f"language_model.model.layers.{self.layer_id}.self_attn.o_proj.weight",
             (self.model_config.hidden_size, self.model_config.hidden_size),
             self.dtype
         ))
 
         self.register_weight(RegisteredWeightItem(
             "ffn_norm",
-            f"model.layers.{self.layer_id}.post_attention_layernorm.weight",
+            f"language_model.model.layers.{self.layer_id}.post_attention_layernorm.weight",
             (self.model_config.hidden_size,),
             self.dtype
         ))
         self.register_weight(RegisteredWeightItem(
             "up_proj",
-            f"model.layers.{self.layer_id}.mlp.up_proj.weight",
+            f"language_model.model.layers.{self.layer_id}.mlp.up_proj.weight",
             (self.model_config.ffn_inter_dim, self.model_config.hidden_size),
             self.dtype
         ))
         self.register_weight(RegisteredWeightItem(
             "gate_proj",
-            f"model.layers.{self.layer_id}.mlp.gate_proj.weight",
+            f"language_model.model.layers.{self.layer_id}.mlp.gate_proj.weight",
             (self.model_config.ffn_inter_dim, self.model_config.hidden_size),
             self.dtype
         ))
         self.register_weight(RegisteredWeightItem(
             "down_proj",
-            f"model.layers.{self.layer_id}.mlp.down_proj.weight",
+            f"language_model.model.layers.{self.layer_id}.mlp.down_proj.weight",
             (self.model_config.hidden_size, self.model_config.ffn_inter_dim),
             self.dtype
         ))
@@ -142,22 +143,22 @@ class LlamaWeight(WeightBase):
 
         self.model_config = model_config
         self.dtype = dtype
-
+        
         self.register_weight(RegisteredWeightItem(
             "wte",
-            "model.embed_tokens.weight",
+            "language_model.model.embed_tokens.weight",
             (self.model_config.vocab_size, self.model_config.hidden_size),
             self.dtype
         ))
         self.register_weight(RegisteredWeightItem(
             "lm_head",
-            "lm_head.weight",
+            "language_model.lm_head.weight",
             (self.model_config.vocab_size, self.model_config.hidden_size),
             self.dtype
         ))
         self.register_weight(RegisteredWeightItem(
             "final_norm",
-            "model.norm.weight",
+            "language_model.model.norm.weight",
             (self.model_config.hidden_size,),
             self.dtype
         ))
@@ -170,6 +171,176 @@ class LlamaWeight(WeightBase):
     def _post_process_after_load(self, getter: callable):
         for layer in self.layers:
             layer.load_weights(getter)
+
+
+class ClipEncoderLayerWeight(WeightBase):
+    """
+    Class stores the weights of one transformer layer (transformer block) in Llama model.
+    """
+
+    def __init__(
+        self,
+        layer_id: int,
+        model_config: LlavaConfig,
+        dtype: torch.dtype
+    ):
+        super().__init__()
+
+        self.layer_id = layer_id
+        self.model_config = model_config
+        self.dtype = dtype
+
+        self.register_weight(RegisteredWeightItem(
+            "q_proj",
+            f"vision_tower.vision_model.encoder.layers.{self.layer_id}.self_attn.q_proj.weight",
+            (self.model_config.vision_config.hidden_size, self.model_config.vision_config.hidden_size),
+            self.dtype
+        ))
+        self.register_weight(RegisteredWeightItem(
+            "k_proj",
+            f"vision_tower.vision_model.encoder.layers.{self.layer_id}.self_attn.k_proj.weight",
+            (self.model_config.vision_config.num_kv_heads*self.model_config.vision_config.head_dim, self.model_config.vision_config.hidden_size),
+            self.dtype
+        ))
+        self.register_weight(RegisteredWeightItem(
+            "v_proj",
+            f"vision_tower.vision_model.encoder.layers.{self.layer_id}.self_attn.v_proj.weight",
+            (self.model_config.vision_config.num_kv_heads*self.model_config.vision_config.head_dim, self.model_config.vision_config.hidden_size),
+            self.dtype
+        ))
+        self.register_weight(RegisteredWeightItem(
+            "o_proj",
+            f"vision_tower.vision_model.encoder.layers.{self.layer_id}.self_attn.out_proj.weight",
+            (self.model_config.vision_config.hidden_size, self.model_config.vision_config.hidden_size),
+            self.dtype
+        ))
+
+        self.register_weight(RegisteredWeightItem(
+            "layer_norm1",
+            f"vision_tower.vision_model.encoder.layers.{self.layer_id}.layer_norm1.weight",
+            (self.model_config.vision_config.hidden_size,),
+            self.dtype
+        ))
+
+        self.register_weight(RegisteredWeightItem(
+            "fc1",
+            f"vision_tower.vision_model.encoder.layers.{self.layer_id}.mlp.fc1.weight",
+            (self.model_config.vision_config.intermediate_size, self.model_config.vision_config.hidden_size),
+            self.dtype
+        ))
+        self.register_weight(RegisteredWeightItem(
+            "fc2",
+            f"vision_tower.vision_model.encoder.layers.{self.layer_id}.mlp.fc2.weight",
+            (self.model_config.vision_config.hidden_size, self.model_config.vision_config.intermediate_size),
+            self.dtype
+        ))
+        
+
+        self.register_weight(RegisteredWeightItem(
+            "layer_norm2",
+            f"vision_tower.vision_model.encoder.layers.{self.layer_id}.layer_norm2.weight",
+            (self.model_config.vision_config.hidden_size,),
+            self.dtype
+        ))
+    
+    def _post_process_after_load(self, getter: callable):
+        pass
+
+class LlavaVisionWeight(WeightBase):
+    def __init__(
+        self,
+        model_config: LlavaConfig,
+        dtype: torch.dtype
+    ):
+        super().__init__()
+
+        self.model_config = model_config
+        self.dtype = dtype
+        
+        self.register_weight(RegisteredWeightItem(
+            "vison_patch_embedding",
+            "vision_tower.vision_model.embeddings.patch_embedding.weight",
+            (self.model_config.vision_config.hidden_size, self.model_config.vision_config.num_channels, self.model_config.vision_config.patch_size, self.model_config.vision_config.patch_size),
+            self.dtype
+        ))
+        num_patches = get_clip_num_patches(image_size=self.model_config.vision_config.image_size, patch_size=self.model_config.vision_config.patch_size)
+        num_positions = num_patches + 1
+        self.register_weight(RegisteredWeightItem(
+            "vison_position_embedding",
+            "vision_tower.vision_model.embeddings.position_embedding.weight",
+            (num_positions, self.model_config.vision_config.hidden_size),
+            self.dtype
+        ))  
+        self.register_weight(RegisteredWeightItem(
+            "vison_pre_layrnorm",
+            "vision_tower.vision_model.pre_layrnorm.weight",
+            (self.model_config.vision_config.hidden_size,),
+            self.dtype
+        ))
+        self.register_weight(RegisteredWeightItem(
+            "vison_post_layernorm",
+            "vision_tower.vision_model.post_layernorm.weight",
+            (self.model_config.vision_config.hidden_size,),
+            self.dtype
+        ))
+        self.layers: list[ClipEncoderLayerWeight] = []
+        for i in range(self.model_config.vision_config.num_layers):
+            layer = ClipEncoderLayerWeight(i, self.model_config, self.dtype)
+            self.layers.append(layer)
+
+    def _post_process_after_load(self, getter: callable):
+        
+        for layer in self.layers:
+            layer.load_weights(getter)
+
+class LlavaMultiModalProjectorWeight(WeightBase):
+    def __init__(
+        self,
+        model_config: LlavaConfig,
+        dtype: torch.dtype
+    ):
+        super().__init__()
+
+        self.model_config = model_config
+        self.dtype = dtype
+        
+        self.register_weight(RegisteredWeightItem(
+            "proj_linear_1",
+            "multi_modal_projector.linear_1.weight",
+            (self.model_config.text_config.hidden_size, self.model_config.vision_config.hidden_size),
+            self.dtype
+        ))
+
+        self.register_weight(RegisteredWeightItem(
+            "proj_linear_2",
+            "multi_modal_projector.linear_2.weight",
+            (self.model_config.text_config.hidden_size, self.model_config.text_config.hidden_size),
+            self.dtype
+        ))
+    
+    def _post_process_after_load(self, getter: callable):
+        pass
+
+class LlavaWeight(WeightBase):
+    def __init__(
+        self,
+        model_config: LlavaConfig,
+        dtype: torch.dtype
+    ):
+        super().__init__()
+
+        self.model_config = model_config
+        self.dtype = dtype
+
+        self.vision_tower= LlavaVisionWeight(model_config, dtype)
+        self.language_model = LlamaWeight(model_config.text_config, dtype)
+        self.multi_modal_projector = LlavaMultiModalProjectorWeight(model_config, dtype)
+
+    def _post_process_after_load(self, getter: callable):
+        
+        self.vision_tower.load_weights(getter)
+        self.language_model.load_weights(getter)
+        self.multi_modal_projector.load_weights(getter)
 
 
 def load_weights(
@@ -236,6 +407,6 @@ def load_weights(
                 return file[item.key].to(item.dtype)
             getter = weight_getter_real
 
-    weight = LlamaWeight(model_config, dtype)
+    weight = LlavaWeight(model_config, dtype)
     weight.load_weights(getter)
     return weight

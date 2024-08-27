@@ -5,7 +5,7 @@ from typing import AsyncGenerator
 import torch
 
 from swiftllm.engine_config import EngineConfig
-from swiftllm.model_config import LlamaModelConfig
+from swiftllm.model_config import LlamaModelConfig, LlavaConfig
 from swiftllm.worker.model import LlamaModel
 from swiftllm.utils import GB
 
@@ -16,7 +16,7 @@ from .scheduler import Scheduler
 class Engine:
     def __init__(self, engine_config: EngineConfig):
         self.engine_config = engine_config
-        self.model_config = LlamaModelConfig.load_from_model_path(engine_config.model_path)
+        self.model_config = LlavaConfig.load_from_model_path(engine_config.model_path)
         self.initialized = False
 
         # The following fields will be created on `init_model()`

@@ -1,10 +1,10 @@
 import itertools
 import math
-
+from typing import List, Optional, Tuple, TypeVar, Union
 import torch
 
 from swiftllm.engine_config import EngineConfig
-from swiftllm.model_config import LlamaModelConfig
+from swiftllm.model_config import LlamaModelConfig, LlavaConfig
 from swiftllm.worker.weight import load_weights
 from swiftllm.worker.block_manager import BlockManager
 from swiftllm.utils import GB
@@ -13,6 +13,7 @@ import swiftllm_c
 from .layers.pre_layer import LlamaPreLayer
 from .layers.transformer_layer import LlamaTransformerLayer
 from .layers.post_layer import LlamaPostLayer
+from .layers.clip_vision_model import CLIPVisionModel, LlavaMultiModalProjector, get_clip_num_patches
 from .infer_state import LlamaInferState
 
 class LlamaModel:
@@ -40,7 +41,7 @@ class LlamaModel:
         self.engine_config = engine_config
 
         # Load model config
-        self.model_config = LlamaModelConfig.load_from_model_path(engine_config.model_path)
+        self.model_config = LlavaConfig.load_from_model_path(engine_config.model_path)
 
         # Weight and RoPE cache
         self.weight = None
@@ -77,18 +78,20 @@ class LlamaModel:
 
         # Initialize layers
         decoding_piggyback_stream = torch.cuda.Stream()
-        self.pre_layer = LlamaPreLayer(self.model_config, self.weight)
+        self.vision_tower = CLIPVisionModel(self.model_config.vision_config, self.weight)
+        self.multi_modal_projector = LlavaMultiModalProjector(self.model_config, self.weight)
+        self.pre_layer = LlamaPreLayer(self.model_config.text_config, self.weight)
         self.transformer_layers = [
             LlamaTransformerLayer(
-                self.model_config,
+                self.model_config.text_config,
                 self.engine_config,
-                self.weight.layers[layer_id],
+                self.weight.language_model.layers[layer_id],
                 decoding_piggyback_stream,
                 layer_id
             )
-            for layer_id in range(self.model_config.num_layers)
+            for layer_id in range(self.model_config.text_config.num_layers)
         ]
-        self.post_layer = LlamaPostLayer(self.model_config, self.weight)
+        self.post_layer = LlamaPostLayer(self.model_config.text_config, self.weight)
 
     @torch.inference_mode()
     def profile_num_blocks(self) -> int:
@@ -137,10 +140,10 @@ class LlamaModel:
         # Initialize KV cache
         kvcache_shape = (
             self.num_blocks,
-            self.model_config.num_layers,
-            self.model_config.num_kv_heads,
+            self.model_config.text_config.num_layers,
+            self.model_config.text_config.num_kv_heads,
             self.engine_config.block_size,
-            self.model_config.head_dim
+            self.model_config.text_config.head_dim
         )
         # Here we use torch.zeros instead of torch.empty, since that torch.empty
         # has the possibility to contain NaNs, which will cause the model to output NaNs.
@@ -150,10 +153,10 @@ class LlamaModel:
         # Initialize KV swap space
         kvswap_shape = (
             self.engine_config.num_cpu_blocks,
-            self.model_config.num_layers,
-            self.model_config.num_kv_heads,
+            self.model_config.text_config.num_layers,
+            self.model_config.text_config.num_kv_heads,
             self.engine_config.block_size,
-            self.model_config.head_dim
+            self.model_config.text_config.head_dim
         )
         self.k_swap = torch.zeros(kvswap_shape, dtype=torch.float16, device="cpu")
         self.v_swap = torch.zeros(kvswap_shape, dtype=torch.float16, device="cpu")
@@ -175,17 +178,101 @@ class LlamaModel:
         )
 
     def _init_to_get_rotary(self):
-        rope_scaling_factor = self.model_config.rope_scaling
-        base = self.model_config.rope_theta
-        max_position_embeddings = self.model_config.max_position_embeddings
+        rope_scaling_factor = self.model_config.text_config.rope_scaling
+        base = self.model_config.text_config.rope_theta
+        max_position_embeddings = self.model_config.text_config.max_position_embeddings
         max_seq_len = max_position_embeddings * rope_scaling_factor
 
-        inv_freq = 1.0 / (base ** (torch.arange(0, self.model_config.head_dim, 2, device="cuda", dtype=torch.float32) / self.model_config.head_dim))
+        inv_freq = 1.0 / (base ** (torch.arange(0, self.model_config.text_config.head_dim, 2, device="cuda", dtype=torch.float32) / self.model_config.text_config.head_dim))
         t = torch.arange(max_seq_len + 128, device="cuda", dtype=torch.float32) / rope_scaling_factor
         freqs = torch.outer(t, inv_freq)
 
         self._cos_cached = torch.cos(freqs).to(torch.float16)
         self._sin_cached = torch.sin(freqs).to(torch.float16)
+    
+    def _get_vision_embeddings(self, image_inputs: torch.Tensor):
+        pixel_values = image_inputs.half()
+        image_features = self.vision_tower.forward(pixel_values)
+        image_features = image_features[:, 1:]
+        
+        return self.multi_modal_projector.forward(image_features)
+
+    def _merge_multimodal_embeddings(
+        self,
+        input_ids: torch.Tensor,
+        inputs_embeds: torch.Tensor,
+        multimodal_embeddings: torch.Tensor,
+        placeholder_token_id: int
+    ):
+
+        mask = (input_ids == placeholder_token_id)
+        num_expected_tokens = mask.sum()
+
+        batch_size, batch_tokens, *_, embed_dim = multimodal_embeddings.shape
+        total_tokens = batch_size * batch_tokens
+        
+        if num_expected_tokens != total_tokens:
+            expr = f"{batch_size} x {batch_tokens}"
+            raise ValueError(
+                f"Attempted to assign {expr} = {total_tokens} "
+                f"multimodal tokens to {num_expected_tokens} placeholders")
+        
+        inputs_embeds[mask] = multimodal_embeddings.view(total_tokens, embed_dim)
+
+        return inputs_embeds
+
+    def _validate_pixel_values(self, data: torch.Tensor) -> torch.Tensor:
+        h = w = self.model_config.vision_config.image_size
+        expected_dims = (3, h, w)
+        actual_dims = tuple(data.shape[1:])
+
+        if actual_dims != expected_dims:
+            expected_expr = ("batch_size", *map(str, expected_dims))
+            raise ValueError(
+                f"The expected shape of pixel values is {expected_expr}. "
+                f"You supplied {tuple(data.shape)}.")
+
+        return data
+
+    def repeat_and_pad_token(
+        self,
+        token: int,
+        *,
+        repeat_count: int = 1,
+        pad_token_left: Optional[int] = None,
+        pad_token_right: Optional[int] = None,
+    ) -> List[int]:
+        replacement = [token] * repeat_count
+        if pad_token_left is not None:
+            replacement = [pad_token_left] + replacement
+        if pad_token_right is not None:
+            replacement = replacement + [pad_token_right]
+
+        return replacement
+
+    def repeat_image_tokens(self, input_ids, placeholder_token_id):
+        
+        input_ids = input_ids.tolist()
+        num_patches = get_clip_num_patches(image_size=self.model_config.vision_config.image_size, patch_size=self.model_config.vision_config.patch_size)
+        
+        new_token_ids: List[int] = []
+        for i, token in enumerate(input_ids):
+            if token == placeholder_token_id:
+                replacement_ids = self.repeat_and_pad_token(
+                    placeholder_token_id,
+                    repeat_count=num_patches,
+                    # pad_token_left=pad_token_left,
+                    # pad_token_right=pad_token_right,
+                )
+                new_token_ids.extend(replacement_ids)
+
+                # No need to further scan the list since we only replace once
+                new_token_ids.extend(input_ids[i + 1:])
+                break
+            else:
+                new_token_ids.append(token)
+        
+        return torch.tensor(new_token_ids).to('cuda')
 
     @torch.inference_mode()
     def _forward(
@@ -196,7 +283,20 @@ class LlamaModel:
         """
         Run a forward pass of the LlamaModel.
         """
-        input_embds = self.pre_layer.forward(input_ids)
+        
+        if infer_state.pixel_values is not None:
+            input_ids = self.repeat_image_tokens(input_ids, self.model_config.image_token_index)
+            input_embds = self.pre_layer.forward(input_ids)
+            
+            self._validate_pixel_values(infer_state.pixel_values)
+            pixel_values = infer_state.pixel_values.to('cuda').half()
+            
+            vision_embedding = self._get_vision_embeddings(image_inputs=pixel_values)
+            
+            input_embds = self._merge_multimodal_embeddings(input_ids, input_embds, vision_embedding, self.model_config.image_token_index)
+        else:
+            input_embds = self.pre_layer.forward(input_ids)
+
         residual_buf = torch.zeros_like(input_embds)
         for layer in self.transformer_layers:
             input_embds = layer.forward(
@@ -218,6 +318,7 @@ class LlamaModel:
         seq_ids_list: list[int],     # [batch_size]
         decoding_seq_lens_list: list[int], # [num_decoding_seqs]
         ignore_kvcache: bool = False,   # Skip actions related to kv cache, useful when profiling the number of kv blocks
+        pixel_values: torch.Tensor = None
     ) -> list[int]:
         """
         Run a forward pass of the LlamaModel.
@@ -282,7 +383,7 @@ class LlamaModel:
 
         seq_block_size = 2048
         decoding_seq_lens_sum = sum(decoding_seq_lens_list)
-        while self.model_config.num_kv_heads*(decoding_seq_lens_sum/seq_block_size) < 1024 and seq_block_size//2 >= 64 and \
+        while self.model_config.text_config.num_kv_heads*(decoding_seq_lens_sum/seq_block_size) < 1024 and seq_block_size//2 >= 64 and \
             max_decoding_len / (seq_block_size//2) <= 128:
             seq_block_size //= 2
 
@@ -291,7 +392,7 @@ class LlamaModel:
             num_tokens = num_tokens,
 
             seq_ids = seq_ids,
-            softmax_scale = self.model_config.head_dim ** -0.5,
+            softmax_scale = self.model_config.text_config.head_dim ** -0.5,
 
             num_prefill_seqs = num_prefill_seqs,
             num_prefill_tokens = num_tokens - (batch_size - num_prefill_seqs),
@@ -313,7 +414,9 @@ class LlamaModel:
             position_cos = self._cos_cached[position_indices],
             position_sin = self._sin_cached[position_indices],
 
-            ignore_kvcache = ignore_kvcache
+            ignore_kvcache = ignore_kvcache,
+
+            pixel_values=pixel_values
         )
 
         return self._forward(
