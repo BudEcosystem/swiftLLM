@@ -2,6 +2,7 @@ import os
 import json
 import torch
 
+
 class LlamaModelConfig:
     """
     The configuration of a LLaMA model (including LLaMA 1/2/3).

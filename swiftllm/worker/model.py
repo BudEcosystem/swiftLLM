@@ -313,7 +313,12 @@ class LlamaModel:
             position_cos = self._cos_cached[position_indices],
             position_sin = self._sin_cached[position_indices],
 
-            ignore_kvcache = ignore_kvcache
+            ignore_kvcache = ignore_kvcache,
+
+            temperature=0.5,
+            top_p=0.5,
+            top_k=1,
+            do_sample=False,
         )
 
         return self._forward(

@@ -1,8 +1,25 @@
 import time
+import torch
+import numpy as np
+import random
 import argparse
 from transformers import AutoTokenizer
 
 import swiftllm
+
+
+def set_seed(seed):
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)  # if you are using multi-GPU
+    np.random.seed(seed)
+    random.seed(seed)
+    torch.backends.cudnn.deterministic = True  # for reproducibility
+    torch.backends.cudnn.benchmark = False
+
+
+set_seed(42)
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()

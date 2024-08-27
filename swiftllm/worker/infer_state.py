@@ -1,3 +1,4 @@
+from typing import Optional
 import dataclasses
 import torch
 
@@ -27,3 +28,9 @@ class LlamaInferState:
     position_sin: torch.Tensor	# [num_tokens, hidden_size]
 
     ignore_kvcache: bool    # Skip storing the key/value cache, useful when profiling the number of kv blocks
+
+    # sampling
+    temperature: Optional[float] = None
+    top_p: Optional[float] = None
+    top_k: Optional[int] = None
+    do_sample: bool = False
